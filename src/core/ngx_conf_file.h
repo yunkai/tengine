@@ -212,6 +212,10 @@ typedef struct {
 } ngx_conf_bitmask_t;
 
 
+typedef struct {
+    ngx_str_t                pattern;
+    ngx_conf_t               *conf;
+} ngx_conf_pattern_ctx_t;
 
 char * ngx_conf_deprecated(ngx_conf_t *cf, void *post, void *data);
 char *ngx_conf_check_num_bounds(ngx_conf_t *cf, void *post, void *data);

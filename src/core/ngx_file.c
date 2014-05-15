@@ -921,7 +921,7 @@ ngx_walk_tree(ngx_tree_ctx_t *ctx, ngx_str_t *tree)
             }
         }
 
-        if (ngx_de_is_file(&dir)) {
+        if (ngx_de_is_file(&dir) && ctx->file_handler) {
 
             ngx_log_debug1(NGX_LOG_DEBUG_CORE, ctx->log, 0,
                            "tree file \"%s\"", file.data);
@@ -943,7 +943,8 @@ ngx_walk_tree(ngx_tree_ctx_t *ctx, ngx_str_t *tree)
             ctx->access = ngx_de_access(&dir);
             ctx->mtime = ngx_de_mtime(&dir);
 
-            if (ctx->pre_tree_handler(ctx, &file) == NGX_ABORT) {
+            if (ctx->pre_tree_handler &&
+                ctx->pre_tree_handler(ctx, &file) == NGX_ABORT) {
                 goto failed;
             }
 
@@ -954,7 +955,8 @@ ngx_walk_tree(ngx_tree_ctx_t *ctx, ngx_str_t *tree)
             ctx->access = ngx_de_access(&dir);
             ctx->mtime = ngx_de_mtime(&dir);
 
-            if (ctx->post_tree_handler(ctx, &file) == NGX_ABORT) {
+            if (ctx->post_tree_handler &&
+                ctx->post_tree_handler(ctx, &file) == NGX_ABORT) {
                 goto failed;
             }
 
@@ -963,7 +965,8 @@ ngx_walk_tree(ngx_tree_ctx_t *ctx, ngx_str_t *tree)
             ngx_log_debug1(NGX_LOG_DEBUG_CORE, ctx->log, 0,
                            "tree special \"%s\"", file.data);
 
-            if (ctx->spec_handler(ctx, &file) == NGX_ABORT) {
+            if (ctx->spec_handler &&
+                ctx->spec_handler(ctx, &file) == NGX_ABORT) {
                 goto failed;
             }
         }
