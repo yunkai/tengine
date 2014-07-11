@@ -183,6 +183,20 @@ ngx_module_t  ngx_http_upstream_keepalive_module = {
 };
 
 
+static int ngx_libc_cdecl
+ngx_http_upstream_cmp_keepalive_shared_srv(const void *one, const void *two)
+{
+    ngx_http_upstream_keepalive_shared_srv_t  *first, *second;
+
+    first = (ngx_http_upstream_keepalive_shared_srv_t *) one;
+    second = (ngx_http_upstream_keepalive_shared_srv_t *) two;
+
+    return ngx_memn2cmp((u_char *) first->sockaddr,
+                        (u_char *) second->sockaddr,
+                        first->socklen, second->socklen);
+}
+
+
 static ngx_int_t
 ngx_http_upstream_init_keepalive_zone(ngx_shm_zone_t *shm_zone, void *data)
 {
@@ -242,6 +256,9 @@ ngx_http_upstream_init_keepalive_zone(ngx_shm_zone_t *shm_zone, void *data)
             ngx_lfstack_init(&srv[i].idle_list[j], offset);
         }
     }
+
+    ngx_qsort(srv, (size_t) info->nsrv, sizeof(*srv),
+              ngx_http_upstream_cmp_keepalive_shared_srv);
 
     conn = (void *) (shm->addr + si + sj + (sk * info->nsrv));
 
@@ -553,13 +570,13 @@ ngx_http_upstream_get_shared_keepalive_peer(ngx_peer_connection_t *pc,
     void *data)
 {
     ngx_http_upstream_keepalive_peer_data_t     *kp = data;
-    ngx_http_upstream_keepalive_shared_srv_t    *srv;
+    ngx_http_upstream_keepalive_shared_srv_t    *srv, skey;
     ngx_http_upstream_keepalive_shared_info_t   *info;
     ngx_http_upstream_keepalive_shared_conn_t   *conn;
     ngx_http_upstream_keepalive_channel_data_t   cd;
 
     ngx_int_t          rc;
-    ngx_uint_t         i, j, k, n;
+    ngx_uint_t         i, j, n;
     ngx_process_t     *p;
     ngx_connection_t  *c;
 
@@ -583,19 +600,14 @@ ngx_http_upstream_get_shared_keepalive_peer(ngx_peer_connection_t *pc,
     /* search shared cache for suitable connection */
 
     info = kp->conf->shared_info;
-    n = info->nsrv;
-    srv = info->srv;
 
-    for (i = 0; i < n; i++) {
-        if (ngx_memn2cmp((u_char *) srv[i].sockaddr, (u_char *) pc->sockaddr,
-                         srv[i].socklen, pc->socklen)
-            == 0)
-        {
-            break;
-        }
-    }
+    ngx_memcpy(skey.sockaddr, pc->sockaddr, pc->socklen);
+    skey.socklen = pc->socklen;
 
-    if (i >= n) {
+    srv = bsearch(&skey, info->srv, info->nsrv, sizeof(*srv),
+                  ngx_http_upstream_cmp_keepalive_shared_srv);
+
+    if (srv == NULL) {
         return NGX_OK;
     }
 
@@ -605,10 +617,10 @@ ngx_http_upstream_get_shared_keepalive_peer(ngx_peer_connection_t *pc,
      */
     conn = NULL;
     n = info->worker_processes;
-    for (k = 0; k < n; k++) {
-        j = (k + ngx_process_idx) % n;
+    for (j = 0; j < n; j++) {
+        i = (j + ngx_process_idx) % n;
 
-        conn = ngx_lfstack_pop(&srv[i].idle_list[j]);
+        conn = ngx_lfstack_pop(&srv->idle_list[i]);
         if (conn != NULL) {
             if (conn->pid == ngx_pid ||
                 conn->pid == ngx_processes[conn->slot].pid) {
@@ -629,14 +641,14 @@ ngx_http_upstream_get_shared_keepalive_peer(ngx_peer_connection_t *pc,
 
     if (conn->pid != ngx_pid) {
         n = sizeof(ngx_http_upstream_keepalive_channel_data_t);
-        k = offsetof(ngx_http_upstream_keepalive_channel_data_t, fd);
+        j = offsetof(ngx_http_upstream_keepalive_channel_data_t, fd);
 
         cd.ch.command = NGX_CMD_RPC;
         cd.ch.pid = ngx_pid;
         cd.ch.slot = ngx_process_slot;
         cd.ch.fd = -1;
         cd.ch.rpc = ngx_http_upstream_keepalive_channel_send_fd;
-        cd.ch.len = n - k;
+        cd.ch.len = n - j;
 
         cd.fd = conn->fd;
         cd.pc = pc;
@@ -650,7 +662,7 @@ ngx_http_upstream_get_shared_keepalive_peer(ngx_peer_connection_t *pc,
             return NGX_YIELD;
         }
 
-        ngx_lfstack_push(&srv[i].idle_list[j], conn);
+        ngx_lfstack_push(&srv->idle_list[i], conn);
         return NGX_OK;
     }
 
@@ -683,7 +695,7 @@ ngx_http_upstream_free_shared_keepalive_peer(ngx_peer_connection_t *pc,
     void *data, ngx_uint_t state)
 {
     ngx_http_upstream_keepalive_peer_data_t     *kp = data;
-    ngx_http_upstream_keepalive_shared_srv_t    *srv;
+    ngx_http_upstream_keepalive_shared_srv_t    *srv, skey;
     ngx_http_upstream_keepalive_shared_info_t   *info;
     ngx_http_upstream_keepalive_shared_conn_t   *conn;
 
@@ -767,20 +779,21 @@ ngx_http_upstream_free_shared_keepalive_peer(ngx_peer_connection_t *pc,
     c->write->log = ngx_cycle->log;
     c->pool->log = ngx_cycle->log;
 
-    srv = info->srv;
-    for (i = 0; i < info->nsrv; i++) {
-        if (ngx_memn2cmp((u_char *) srv[i].sockaddr, (u_char *) pc->sockaddr,
-                         srv[i].socklen, pc->socklen)
-            == 0)
-        {
-            break;
-        }
+    ngx_memcpy(skey.sockaddr, pc->sockaddr, pc->socklen);
+    skey.socklen = pc->socklen;
+
+    srv = bsearch(&skey, info->srv, info->nsrv, sizeof(*srv),
+                  ngx_http_upstream_cmp_keepalive_shared_srv);
+
+    if (srv == NULL) {
+        goto invalid;
     }
 
+    i = srv - (ngx_http_upstream_keepalive_shared_srv_t *) info->srv;
     conn->srv_index = i;
     conn->force_timeout = 0;
 
-    ngx_lfstack_push(&srv[i].idle_list[ngx_process_idx], conn);
+    ngx_lfstack_push(&srv->idle_list[ngx_process_idx], conn);
 
     if (c->read->ready) {
         ngx_http_upstream_keepalive_close_handler(c->read);
